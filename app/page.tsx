@@ -88,6 +88,7 @@ export default function CatalogImageManager() {
   const [uploadingId, setUploadingId] = useState<string | null>(null);
   const [searchingId, setSearchingId] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<Record<string, SearchResult[]>>({});
+  const [batchSearch, setBatchSearch] = useState<{ running: boolean; current: number; total: number; cancel: boolean }>({ running: false, current: 0, total: 0, cancel: false });
   const [manualUrl, setManualUrl] = useState('');
   const [filter, setFilter] = useState({ search: '', status: 'all', fabricante: 'all' });
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null);
@@ -230,7 +231,59 @@ export default function CatalogImageManager() {
     return { folder, publicId };
   };
 
-  // Buscar imagens via backend
+  // Busca em lote — processa todos pendentes em background
+  const batchSearchPending = async () => {
+    const pending = products.filter(p => p._status === 'pending' && !searchResults[p._id]);
+    if (!pending.length) {
+      showToast('Nenhum produto pendente sem busca', 'info');
+      return;
+    }
+    setBatchSearch({ running: true, current: 0, total: pending.length, cancel: false });
+    for (let i = 0; i < pending.length; i++) {
+      // Lê flag de cancelamento via state atualizado
+      const shouldCancel = await new Promise<boolean>(resolve => {
+        setBatchSearch(s => { resolve(s.cancel); return s; });
+      });
+      if (shouldCancel) break;
+
+      const product = pending[i];
+      setBatchSearch(s => ({ ...s, current: i + 1 }));
+      try {
+        const body = {
+          descricao: product[mapping.nome] as string || '',
+          fabricante: mapping.fabricante ? (product[mapping.fabricante] as string || '') : '',
+          sabor: mapping.variante ? (product[mapping.variante] as string || '') : '',
+          peso: mapping.peso ? (product[mapping.peso] as string || '') : '',
+          siteFornecedor: mapping.siteFornecedor ? (product[mapping.siteFornecedor] as string || '') : '',
+          urlProduto: mapping.urlProduto ? (product[mapping.urlProduto] as string || '') : '',
+        };
+        const res = await fetch('/api/search-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (res.ok && Array.isArray(data.results)) {
+          setSearchResults(r => ({ ...r, [product._id]: data.results }));
+        }
+      } catch (err) {
+        console.error('Batch error:', err);
+      }
+      // Delay de 8s entre chamadas pra respeitar rate limit
+      if (i < pending.length - 1) {
+        await new Promise(r => setTimeout(r, 8000));
+      }
+    }
+    setBatchSearch({ running: false, current: 0, total: 0, cancel: false });
+    showToast('Busca em lote concluída', 'success');
+  };
+
+  const cancelBatchSearch = () => {
+    setBatchSearch(s => ({ ...s, cancel: true }));
+    showToast('Cancelando...', 'info');
+  };
+
+  // Buscar imagens via backend (individual)
   const searchImages = async (product: Product) => {
     const id = product._id;
     setSearchingId(id);
@@ -593,6 +646,20 @@ export default function CatalogImageManager() {
 
         {currentStep === 'review' && (
           <div className="space-y-4">
+            {batchSearch.running && (
+              <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 flex items-center gap-4">
+                <RefreshCw size={20} className="text-indigo-600 animate-spin flex-shrink-0" />
+                <div className="flex-1">
+                  <div className="text-sm font-medium text-indigo-900">Buscando imagens em lote...</div>
+                  <div className="text-xs text-indigo-700 mt-0.5">Processando {batchSearch.current} de {batchSearch.total} produtos (8s entre cada)</div>
+                  <div className="h-1.5 bg-indigo-100 rounded-full mt-2 overflow-hidden">
+                    <div className="h-full bg-indigo-600 transition-all" style={{ width: `${(batchSearch.current / batchSearch.total) * 100}%` }} />
+                  </div>
+                </div>
+                <button onClick={cancelBatchSearch} className="px-3 py-1.5 text-xs bg-white border border-indigo-300 text-indigo-700 rounded-lg hover:bg-indigo-100">Cancelar</button>
+              </div>
+            )}
+
             <div className="bg-white rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center gap-6 mb-4">
                 <span className="text-sm text-slate-600">Total: <b>{stats.total}</b></span>
@@ -601,6 +668,11 @@ export default function CatalogImageManager() {
                 <div className="flex-1 bg-slate-100 h-2 rounded-full overflow-hidden">
                   <div className="bg-emerald-500 h-full transition-all" style={{ width: `${stats.total ? (stats.done / stats.total * 100) : 0}%` }} />
                 </div>
+                {!batchSearch.running && stats.pending > 0 && (
+                  <button onClick={batchSearchPending} className="px-3 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 flex items-center gap-1.5 flex-shrink-0">
+                    <Search size={14} /> Buscar pendentes ({stats.pending})
+                  </button>
+                )}
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <input type="text" placeholder="Buscar..." value={filter.search} onChange={e => setFilter({ ...filter, search: e.target.value })} className="px-3 py-2 border border-slate-300 rounded-lg text-sm" />
@@ -666,8 +738,8 @@ export default function CatalogImageManager() {
                               </button>
                             </>
                           )}
-                          <button onClick={() => { setSelectedProduct(product); if (!searchResults[product._id]) searchImages(product); }} className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 flex items-center gap-1.5">
-                            <Search size={14} /> {hasImage ? 'Trocar' : 'Buscar'}
+                          <button onClick={() => { setSelectedProduct(product); if (!searchResults[product._id]) searchImages(product); }} className={`px-3 py-2 text-white rounded-lg text-sm flex items-center gap-1.5 ${searchResults[product._id]?.length ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+                            <Search size={14} /> {hasImage ? 'Trocar' : searchResults[product._id]?.length ? `Revisar (${searchResults[product._id].length})` : 'Buscar'}
                           </button>
                         </div>
                       </div>
