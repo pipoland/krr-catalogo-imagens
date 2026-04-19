@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Upload, Search, Image as ImageIcon, Check, X, Download, Settings, Folder, RefreshCw, AlertCircle, Trash2, Eye, Copy } from 'lucide-react';
+import { Upload, Search, Image as ImageIcon, Check, X, Download, Settings, Folder, RefreshCw, Trash2, Eye, Copy } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
 
@@ -68,6 +68,12 @@ type Product = Record<string, string | undefined> & {
   _status: 'pending' | 'done';
 };
 
+interface SearchResult {
+  url: string;
+  source: string;
+  oficial: boolean;
+}
+
 export default function CatalogImageManager() {
   const [config, setConfig] = useState({ cloudName: '', uploadPreset: '' });
   const [mapping, setMapping] = useState(DEFAULT_MAPPING);
@@ -80,6 +86,8 @@ export default function CatalogImageManager() {
   const [pastedContent, setPastedContent] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
+  const [searchingId, setSearchingId] = useState<string | null>(null);
+  const [searchResults, setSearchResults] = useState<Record<string, SearchResult[]>>({});
   const [manualUrl, setManualUrl] = useState('');
   const [filter, setFilter] = useState({ search: '', status: 'all', fabricante: 'all' });
   const [toast, setToast] = useState<{ msg: string; type: string } | null>(null);
@@ -222,22 +230,57 @@ export default function CatalogImageManager() {
     return { folder, publicId };
   };
 
+  // Buscar imagens via backend
+  const searchImages = async (product: Product) => {
+    const id = product._id;
+    setSearchingId(id);
+    try {
+      const body = {
+        descricao: product[mapping.nome] as string || '',
+        fabricante: mapping.fabricante ? (product[mapping.fabricante] as string || '') : '',
+        sabor: mapping.variante ? (product[mapping.variante] as string || '') : '',
+        peso: mapping.peso ? (product[mapping.peso] as string || '') : '',
+        siteFornecedor: mapping.siteFornecedor ? (product[mapping.siteFornecedor] as string || '') : '',
+        urlProduto: mapping.urlProduto ? (product[mapping.urlProduto] as string || '') : '',
+      };
+      const res = await fetch('/api/search-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const results: SearchResult[] = data.results || [];
+      setSearchResults(r => ({ ...r, [id]: results }));
+      if (!results.length) showToast('Nenhuma imagem encontrada', 'error');
+    } catch (err) {
+      console.error(err);
+      showToast('Erro na busca: ' + (err as Error).message, 'error');
+    } finally {
+      setSearchingId(null);
+    }
+  };
+
+  // Upload via backend (URL remota)
   const uploadToCloudinary = async (product: Product, imageUrl: string) => {
     const id = product._id;
     setUploadingId(id);
     try {
       const { folder, publicId } = computePaths(product);
-      const formData = new FormData();
-      formData.append('file', imageUrl);
-      formData.append('upload_preset', config.uploadPreset);
-      formData.append('public_id', publicId);
-      if (folder) formData.append('folder', folder);
-      const res = await fetch(`https://api.cloudinary.com/v1_1/${config.cloudName}/image/upload`, {
+      const res = await fetch('/api/upload-cloudinary', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageUrl,
+          publicId,
+          folder,
+          cloudName: config.cloudName,
+          uploadPreset: config.uploadPreset,
+        }),
       });
       const data = await res.json();
-      if (data.error) throw new Error(data.error.message);
+      if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+
       const realPublicId = data.public_id;
       const parts = realPublicId.split('/');
       const realFileName = parts.pop() as string;
@@ -255,6 +298,7 @@ export default function CatalogImageManager() {
       persist(STORAGE_KEYS.products, { products: updated, columns });
       setSelectedProduct(null);
       setManualUrl('');
+      setSearchResults(r => { const n = { ...r }; delete n[id]; return n; });
       showToast('Imagem enviada com sucesso', 'success');
     } catch (err) {
       console.error(err);
@@ -264,6 +308,7 @@ export default function CatalogImageManager() {
     }
   };
 
+  // Upload de arquivo local (direto pro Cloudinary, unsigned)
   const uploadLocalFile = async (product: Product, file: File) => {
     const id = product._id;
     setUploadingId(id);
@@ -349,6 +394,7 @@ export default function CatalogImageManager() {
     setProducts([]);
     setColumns([]);
     setSelectedProduct(null);
+    setSearchResults({});
     setConfig({ cloudName: '', uploadPreset: '' });
     setMapping(DEFAULT_MAPPING);
     setTemplates(DEFAULT_TEMPLATES);
@@ -394,6 +440,10 @@ export default function CatalogImageManager() {
     return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><div className="text-slate-500">Carregando...</div></div>;
   }
 
+  const currentResults = selectedProduct ? (searchResults[selectedProduct._id] || []) : [];
+  const isSearching = selectedProduct ? searchingId === selectedProduct._id : false;
+  const isUploading = selectedProduct ? uploadingId === selectedProduct._id : false;
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       {toast && (
@@ -410,7 +460,7 @@ export default function CatalogImageManager() {
             </div>
             <div>
               <h1 className="font-semibold text-lg">Catálogo KRR — Imagens</h1>
-              <p className="text-xs text-slate-500">Upload planilha → Cloudinary → CSV</p>
+              <p className="text-xs text-slate-500">Upload planilha → Busca automática → Cloudinary → CSV</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -455,7 +505,7 @@ export default function CatalogImageManager() {
               ) : (
                 <div>
                   <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3 text-xs text-blue-900">
-                    <strong>Dica:</strong> No Google Sheets, Ctrl+A (selecionar tudo) → Ctrl+C → Ctrl+V aqui. Aceita CSV ou TSV.
+                    <strong>Dica:</strong> No Google Sheets, Ctrl+A → Ctrl+C → Ctrl+V aqui. Aceita CSV ou TSV.
                   </div>
                   <textarea value={pastedContent} onChange={e => setPastedContent(e.target.value)} placeholder="Cole aqui..." className="w-full h-64 px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                   <div className="flex items-center justify-between mt-3">
@@ -472,7 +522,6 @@ export default function CatalogImageManager() {
           <div className="space-y-6">
             <div className="bg-white rounded-2xl border border-slate-200 p-6">
               <h2 className="font-semibold text-lg mb-1">Cloudinary</h2>
-              <p className="text-sm text-slate-500 mb-4">Upload preset configurado como "unsigned" no painel Cloudinary</p>
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-sm font-medium text-slate-700 block mb-1">Cloud name</label>
@@ -579,6 +628,7 @@ export default function CatalogImageManager() {
                       <div className="flex items-start gap-4">
                         <div className="w-20 h-20 bg-slate-100 rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
                           {hasImage ? (
+                            // eslint-disable-next-line @next/next/no-img-element
                             <img src={product.imagem_thumb as string} alt="" className="w-full h-full object-cover" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
                           ) : (
                             <ImageIcon size={24} className="text-slate-300" />
@@ -616,8 +666,8 @@ export default function CatalogImageManager() {
                               </button>
                             </>
                           )}
-                          <button onClick={() => setSelectedProduct(product)} className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 flex items-center gap-1.5">
-                            <Upload size={14} /> {hasImage ? 'Trocar' : 'Enviar'}
+                          <button onClick={() => { setSelectedProduct(product); if (!searchResults[product._id]) searchImages(product); }} className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 flex items-center gap-1.5">
+                            <Search size={14} /> {hasImage ? 'Trocar' : 'Buscar'}
                           </button>
                         </div>
                       </div>
@@ -635,7 +685,7 @@ export default function CatalogImageManager() {
 
       {selectedProduct && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSelectedProduct(null)}>
-          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="p-5 border-b border-slate-200 flex items-start justify-between">
               <div>
                 <h3 className="font-semibold">{selectedProduct[mapping.nome] as string}</h3>
@@ -649,28 +699,80 @@ export default function CatalogImageManager() {
                   })()}
                 </p>
               </div>
-              <button onClick={() => setSelectedProduct(null)} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg"><X size={16} /></button>
+              <div className="flex items-center gap-2">
+                <button onClick={() => searchImages(selectedProduct)} disabled={isSearching} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg disabled:opacity-40" title="Buscar novamente">
+                  <RefreshCw size={16} className={isSearching ? 'animate-spin' : ''} />
+                </button>
+                <button onClick={() => setSelectedProduct(null)} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg"><X size={16} /></button>
+              </div>
             </div>
             <div className="p-5 overflow-y-auto flex-1 space-y-5">
-              {mapping.urlProduto && selectedProduct[mapping.urlProduto] && (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                  <div className="text-xs font-medium text-blue-900 mb-1">URL do produto na planilha:</div>
-                  <a href={selectedProduct[mapping.urlProduto] as string} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-700 hover:underline break-all flex items-center gap-1">
-                    <Eye size={12} /> {selectedProduct[mapping.urlProduto] as string}
-                  </a>
+              {isSearching ? (
+                <div className="py-12 text-center text-slate-400">
+                  <RefreshCw size={24} className="animate-spin mx-auto mb-2" />
+                  Buscando imagens...
+                </div>
+              ) : currentResults.length > 0 ? (
+                <div>
+                  <h4 className="font-medium text-sm mb-3">Imagens encontradas ({currentResults.length})</h4>
+                  <div className="grid grid-cols-3 gap-3">
+                    {currentResults.map((img, i) => (
+                      <div key={i} className={`border rounded-lg overflow-hidden relative bg-white ${img.oficial ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'}`}>
+                        {img.oficial && (
+                          <div className="absolute top-2 left-2 z-10 px-2 py-0.5 bg-emerald-600 text-white text-[10px] font-semibold rounded shadow">
+                            ✓ OFICIAL
+                          </div>
+                        )}
+                        <div className="aspect-square flex items-center justify-center bg-slate-50">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={img.url} alt="" className="max-w-full max-h-full object-contain" loading="lazy" onError={e => { (e.target as HTMLImageElement).style.opacity = '0.2'; }} />
+                        </div>
+                        <div className="p-2 bg-white border-t border-slate-100">
+                          <p className="text-[10px] text-slate-400 truncate mb-1.5" title={img.source}>{img.source}</p>
+                          <div className="flex gap-1">
+                            <a href={img.url} target="_blank" rel="noopener noreferrer" className="p-1.5 border border-slate-300 rounded hover:bg-slate-50" title="Abrir em nova aba">
+                              <Eye size={12} />
+                            </a>
+                            <button onClick={() => uploadToCloudinary(selectedProduct, img.url)} disabled={isUploading} className={`flex-1 px-2 py-1.5 text-white text-xs rounded disabled:opacity-40 ${img.oficial ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}>
+                              {isUploading ? 'Enviando...' : 'Usar esta'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="py-8 text-center text-slate-400 text-sm">
+                  <p className="mb-3">Nenhuma imagem encontrada ainda</p>
+                  <button onClick={() => searchImages(selectedProduct)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700">
+                    <Search size={14} className="inline mr-1" /> Buscar agora
+                  </button>
                 </div>
               )}
 
-              {mapping.siteFornecedor && selectedProduct[mapping.siteFornecedor] && (
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
-                  <div className="text-xs font-medium text-slate-700 mb-1">Site do fornecedor:</div>
-                  <a href={selectedProduct[mapping.siteFornecedor] as string} target="_blank" rel="noopener noreferrer" className="text-xs text-slate-600 hover:underline break-all flex items-center gap-1">
-                    <Eye size={12} /> {selectedProduct[mapping.siteFornecedor] as string}
-                  </a>
+              {(mapping.urlProduto && selectedProduct[mapping.urlProduto]) || (mapping.siteFornecedor && selectedProduct[mapping.siteFornecedor]) ? (
+                <div className="border-t border-slate-200 pt-5 space-y-2">
+                  {mapping.urlProduto && selectedProduct[mapping.urlProduto] && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                      <div className="text-xs font-medium text-blue-900 mb-1">URL do produto:</div>
+                      <a href={selectedProduct[mapping.urlProduto] as string} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-700 hover:underline break-all flex items-center gap-1">
+                        <Eye size={12} /> {selectedProduct[mapping.urlProduto] as string}
+                      </a>
+                    </div>
+                  )}
+                  {mapping.siteFornecedor && selectedProduct[mapping.siteFornecedor] && (
+                    <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                      <div className="text-xs font-medium text-slate-700 mb-1">Site do fornecedor:</div>
+                      <a href={selectedProduct[mapping.siteFornecedor] as string} target="_blank" rel="noopener noreferrer" className="text-xs text-slate-600 hover:underline break-all flex items-center gap-1">
+                        <Eye size={12} /> {selectedProduct[mapping.siteFornecedor] as string}
+                      </a>
+                    </div>
+                  )}
                 </div>
-              )}
+              ) : null}
 
-              <div>
+              <div className="border-t border-slate-200 pt-5">
                 <h4 className="font-medium text-sm mb-2">Subir arquivo do computador</h4>
                 <label className="block">
                   <input type="file" accept="image/*" onChange={e => {
@@ -688,14 +790,8 @@ export default function CatalogImageManager() {
                 <h4 className="font-medium text-sm mb-2">Colar URL de imagem</h4>
                 <div className="flex gap-2">
                   <input type="text" value={manualUrl} onChange={e => setManualUrl(e.target.value)} placeholder="https://..." className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm" />
-                  <button
-                    onClick={() => {
-                      if (manualUrl.trim()) uploadToCloudinary(selectedProduct, manualUrl.trim());
-                    }}
-                    disabled={uploadingId === selectedProduct._id || !manualUrl.trim()}
-                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-40"
-                  >
-                    {uploadingId === selectedProduct._id ? 'Enviando...' : 'Enviar'}
+                  <button onClick={() => { if (manualUrl.trim()) uploadToCloudinary(selectedProduct, manualUrl.trim()); }} disabled={isUploading || !manualUrl.trim()} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-40">
+                    {isUploading ? 'Enviando...' : 'Enviar'}
                   </button>
                 </div>
               </div>
