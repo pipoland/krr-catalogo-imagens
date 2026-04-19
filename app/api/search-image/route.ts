@@ -82,28 +82,52 @@ Retorne APENAS JSON array (sem markdown, sem prefixos):
   }
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-       model: 'claude-sonnet-4-5',
-        max_tokens: 2048,
-        messages: [{ role: 'user', content: prompt }],
-        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      }),
-    });
+    // Retry com backoff exponencial em caso de 429 (rate limit)
+    const maxAttempts = 3;
+    let lastError = '';
+    let response: Response | null = null;
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      console.error('Anthropic API error:', response.status, errText.slice(0, 300));
-      if (response.status === 429) {
-        return NextResponse.json({ error: 'Rate limit atingido. Aguarde alguns segundos.' }, { status: 429 });
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-5',
+          max_tokens: 2048,
+          messages: [{ role: 'user', content: prompt }],
+          tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        }),
+      });
+
+      if (response.ok) break;
+
+      if (response.status === 429 && attempt < maxAttempts) {
+        // Espera progressiva: 5s, 15s
+        const waitMs = attempt === 1 ? 5000 : 15000;
+        console.log(`Rate limit (tentativa ${attempt}). Aguardando ${waitMs}ms...`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
       }
-      return NextResponse.json({ error: `API Claude retornou ${response.status}` }, { status: 500 });
+
+      const errText = await response.text().catch(() => '');
+      lastError = errText.slice(0, 300);
+      console.error('Anthropic API error:', response.status, lastError);
+      break;
+    }
+
+    if (!response || !response.ok) {
+      if (response?.status === 429) {
+        return NextResponse.json({
+          error: 'Rate limit persistente. Aguarde 1-2 minutos antes de tentar novamente.',
+        }, { status: 429 });
+      }
+      return NextResponse.json({
+        error: `API Claude retornou ${response?.status || 'sem resposta'}: ${lastError}`,
+      }, { status: 500 });
     }
 
     const data = await response.json();
