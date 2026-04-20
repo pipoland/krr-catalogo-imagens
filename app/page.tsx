@@ -10,7 +10,7 @@ const CLOUDINARY_CLOUD_NAME = 'dzygfrpb6';
 const CLOUDINARY_UPLOAD_PRESET = 'krr_suplementos';
 const FOLDER_TEMPLATE = 'suplementos/{marca}/{categoria}';
 const PUBLIC_ID_TEMPLATE = '{codigo}-{nome}-{variante}';
-const CARD_VARIANT = 'f_auto,q_auto,c_fill,ar_1:1,w_600';
+const CARD_VARIANT = 'e_trim/c_fit,w_260,h_260/c_lpad,w_400,h_400,b_white/f_auto,q_auto';
 
 // ============================================
 // STORAGE KEYS
